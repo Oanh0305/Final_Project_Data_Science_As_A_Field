@@ -1,0 +1,183 @@
+---
+title: "Week 3 Final Assignment"
+author: "Oanh"
+date: "2023-08-21"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# NYPD Shooting Incident Data Report
+
+## Introduction:
+
+To begin, we need to install these necessary packages:(tidyverse),(caret), (ggplot2), (knitr), (dplyr)
+
+```{r , message=FALSE}
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+```
+
+Read the data from the link.
+
+```{r}
+#Read the CSV file from URL
+nypd_data<-read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD" )
+str(nypd_data)
+```
+
+Display the first 10 rows of the dataset
+
+```{r}
+head(nypd_data,5)
+```
+
+## Data Preparation and Cleaning
+
+Missing Values
+
+```{r}
+#Replace missing value with "N/A"
+nypd_data<-nypd_data %>% mutate(across(everything(),~ifelse(is.na(.), "N/A", .)))
+```
+
+Making sure there is no missing values.
+
+```{r}
+sum(is.na(nypd_data))
+```
+
+Show the first 10 rows
+
+```{r}
+head(nypd_data,10)
+```
+
+Remove any duplicates
+
+```{r}
+nypd_data<-distinct(nypd_data)
+nrow(nypd_data)
+```
+
+There are no duplicates
+
+## Incident vs Race analysis
+
+Let's check unique values in VIC_RACE
+
+```{r}
+unique(nypd_data$VIC_RACE)
+```
+
+Sort the VIC_RACE in descending order to see which one has the most shootings.
+
+```{r}
+nypd_data %>% group_by(VIC_RACE) %>% summarise(Total =n()) %>% arrange(desc(Total))
+```
+
+Make chart to see incidences.
+
+```{r}
+#Group data by VIC_RACE and calculate the total number of incidents
+VIC_RACE_shooting <- nypd_data %>% group_by(VIC_RACE) %>% summarise(incidents=n())
+#Create a bar chart
+ggplot(VIC_RACE_shooting, aes(x=VIC_RACE, y=incidents, fill=VIC_RACE)) + geom_bar(stat="identity") + xlab("VIC_RACE") +ylab("INCIDENCES") + ggtitle("INCIDENCES IN VARIOUS VIC_RACE") +  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+Make a confusion matrix between PERP_RACE and VIC_RACE.
+
+```{r}
+filter_nypd = nypd_data[nypd_data$PERP_RACE != "" & nypd_data$PERP_RACE != "(null)", ]
+cm <- confusionMatrix(factor(filter_nypd$PERP_RACE), factor(filter_nypd$VIC_RACE))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Prediction,Reference, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "PERP_RACE",y = "VIC_RACE") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))      
+```
+
+## Modeling
+
+Here I made a new column for the population for each Race. I am combining `BLACK_HISPANIC` and `WHITE_HISPANIC` into a single value `HISPANIC` since the [NYC demographic data](https://s-media.nyc.gov/agencies/dcp/assets/files/pdf/data-tools/census/acs/acs_demo_2006.pdf) only has population of `HISPANIC` in general.
+
+```{r}
+#Filter and remove Unknown Race
+nypd_data<-nypd_data[nypd_data$VIC_RACE!= "UNKNOWN", ]
+#Make new column
+nypd_data[nypd_data$VIC_RACE == "BLACK HISPANIC" | nypd_data$VIC_RACE == "WHITE HISPANIC", c("VIC_RACE")] = "HISPANIC"
+nypd_data <- nypd_data %>% mutate(Population = case_when(VIC_RACE =="BLACK" ~ 1947328, VIC_RACE=="WHITE" ~ 2854519, VIC_RACE=="HISPANIC" ~ 2267827, VIC_RACE=="AMERICAN INDIAN/ALASKAN NATIVE" ~ 13506, VIC_RACE=="ASIAN / PACIFIC ISLANDER" ~97022 ))
+head(nypd_data,10)
+```
+
+### Calculate the shooting rate per 100,000 people and Plot the shooting rate for each RACE
+
+```{r}
+nypd_shooting_rate<-nypd_data %>% group_by(VIC_RACE) %>% summarise(total_shooting=n(), population=unique(Population), 
+shooting_rate=total_shooting/(population/100000)) %>% arrange(desc(shooting_rate))
+ggplot(nypd_shooting_rate, aes(x = VIC_RACE, y = shooting_rate)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  ggtitle("Chance of Getting Shot for Each Race") +
+  xlab("VIC_RACE") +
+  ylab("Shooting Rate per 100,000 People") +
+  theme_minimal()+theme(axis.text.x = element_text(angle = 50, hjust=1)) 
+```
+
+```{r}
+nypd_shooting_rate %>%
+  as_tibble() %>%
+  select(VIC_RACE, shooting_rate) %>%
+  mutate(shooting_rate = sprintf("%.2f", shooting_rate))
+```
+
+```{r}
+nypd_shooting_rate_per_person <- nypd_shooting_rate %>%
+  mutate(shooting_rate_per_person = total_shooting / population) %>%
+  select(VIC_RACE, shooting_rate_per_person) %>%
+  mutate(shooting_rate_per_person = sprintf("%.6f", shooting_rate_per_person * 100)) %>%
+  rename(`Borough` = VIC_RACE, `Shooting Rate per Person` = shooting_rate_per_person) %>%
+  mutate(`Shooting Rate per Person` = paste0(`Shooting Rate per Person`, "%"))
+print(nypd_shooting_rate_per_person)
+```
+
+### Create the linear regression model and Print the summary of the model
+
+```{r}
+nypd_data <- nypd_data %>%
+  mutate(Total = ifelse(!is.na(VIC_RACE), 1, 0)) %>%
+  group_by(VIC_RACE) %>%
+  mutate(Total = cumsum(Total))
+
+lm_model <- lm(Total ~ Population, data = nypd_data)
+
+summary(lm_model)
+```
+
+### Create a scatter plot with the regression line
+
+```{r}
+ggplot(nypd_data, aes(x = Population, y = Total)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  xlab("Population") +
+  ylab("Total Incidences") +
+  ggtitle("Linear Regression: Total Incidences vs Population")
+```
+
+## Conclusion
+
+### Bias
+
+If we only see the INCIDENCES IN VARIOUS VIC_RACE chart, we can conclude that the Black people have the highest chances of getting shot compared to the others in New York City. However, if we also see the confusion matrix between PERP_RACE and VIC_RACE, we will know that the original cause is because back people shooting black people has the highest number cases. We can understand that because people in same race can involve in similar of activities and tends to live in the same neighborhood. Looking at only VIC_RACE charts will introduce us some bias in shooting rates of different races. However, we can mitigate that by exploring more fine-grained visualization such as confusion matrix between VIC_RACE vs PERP_RACE as I have done here.
+
+### Model prediction
+
+Based on the linear regression results, we can conclude that there is a negative relationship between the number of shooting incidents and the population size in each Race. In other words, as the population size increases, the number of shooting incidents tends to decrease . The R-squared value of 0.03064 indicates that the model explains approximately 3% of the variability in the number of shooting incidents. However, it's important to note that correlation does not imply causation, and there may be other factors that contribute to the number of shooting incidents beyond just population size.
